@@ -1,0 +1,19 @@
+node_modules/
+.build-env/
+*.zip
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.local
+.env.*.local
+*.bak
+*.bak-*
+*.tmp
+credentials.dat
+
+# 资产库是运行数据，不进仓库
+配置/
+图片/
+索引/
+运行时/

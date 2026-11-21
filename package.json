@@ -1,0 +1,35 @@
+{
+  "name": "openchamber-image-assets",
+  "version": "2.2.1",
+  "private": true,
+  "type": "module",
+  "description": "Magic Raw Picture：多接口生图（云端图片 API / 本地 ComfyUI 工作流），手动指定默认接口与默认模型；文生图、参考图生图、视频占位与资产库管理，密钥按接口 DPAPI 加密。",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.7.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "image-assets",
+        "name": "Magic Raw Picture",
+        "icon": "icon.svg",
+        "entry": "panel/index.html"
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {}
+      },
+      "opencodePlugin": "plugin",
+      "tools": [
+        {
+          "match": "image_assets_generate",
+          "name": "生图",
+          "icon": "icon.svg",
+          "title": "{input.prompt}"
+        }
+      ]
+    }
+  }
+}

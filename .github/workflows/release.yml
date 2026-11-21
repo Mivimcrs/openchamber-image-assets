@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 自检（清单/入口/语法/回归守卫）
+        run: node tools/check.mjs
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          ZIP="openchamber-image-assets-${VERSION}.zip"
+          zip -r "$ZIP" . \
+            -x '.git/*' '.github/*' 'tools/*' 'node_modules/*' '*.zip' \
+               '源码/*' '测试/*' '文档/*' '构建.mjs' '.build-env/*'
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          unzip -l "$ZIP" | head -30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openchamber-image-assets-${{ env.VERSION }}
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
