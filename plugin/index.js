@@ -1,4 +1,4 @@
-/**
+﻿/**
  * OpenCode 插件：注册 image_assets_* 工具（文生图 / 参考图生图 / 视频占位 + 状态查询）。
  *
  * 路由：按扩展设置里的「接口」决定走哪条链路
@@ -23,8 +23,16 @@ import { describeTemplate, SLOTS, SLOT_LABEL } from './shared/工作流.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const EXT_ROOT = path.resolve(HERE, '..')
-const LIB_ROOT = libraryRoot()
 const REF_MAX_BYTES = 20 * 1024 * 1024
+
+/**
+ * 资产库根目录在**每次调用时**解析：面板里换了自定义路径后，
+ * 插件下一次调用就跟着走，不需要重启 OpenChamber。
+ * 优先级：环境变量 IMAGE_ASSETS_ROOT > 自定义路径 > 用户主目录默认。
+ */
+function libRoot() {
+  return libraryRoot()
+}
 
 // ---- 模型预检（只读，不耗生成额度）----
 
@@ -98,7 +106,7 @@ function summarizeUsage(usage) {
 
 /** 解析本次要用的接口 / 密钥 / 模型，失败一律给结构化报告。 */
 function prepare(opts = {}) {
-  const settings = readSettings(LIB_ROOT)
+  const settings = readSettings(libRoot())
   const wanted = typeof opts.interfaceId === 'string' ? opts.interfaceId.trim() : ''
   const picked = resolveInterface(settings, wanted)
   if (!picked.interface) {
@@ -110,7 +118,7 @@ function prepare(opts = {}) {
     ))
   }
   const iface = picked.interface
-  const resolved = resolveApiKey(LIB_ROOT, iface)
+  const resolved = resolveApiKey(libRoot(), iface)
   if (iface.kind === 'cloud') {
     if (!resolved.key) throw new Error(failureReport('配置', resolved.error || '密钥未配置'))
     const verdict = checkKey(resolved.key)
@@ -146,7 +154,7 @@ async function commonGenerate(input, context, ctx, { slot = '', progress } = {})
   let refs = []
   if (inputImages.length) {
     await progress?.(`读取参考图（${inputImages.length} 张）…`)
-    refs = inputImages.map((raw) => readReference(LIB_ROOT, raw))
+    refs = inputImages.map((raw) => readReference(libRoot(), raw))
   }
 
   // 会话上下文：资产记录要能对上「本次会话」
@@ -189,8 +197,8 @@ async function commonGenerate(input, context, ctx, { slot = '', progress } = {})
   }
 
   await progress?.('验证图片并入库…')
-  const libPaths = ensureLibrary(LIB_ROOT)
-  const refRecords = refs.map((r) => referenceRecord(LIB_ROOT, r))
+  const libPaths = ensureLibrary(libRoot())
+  const refRecords = refs.map((r) => referenceRecord(libRoot(), r))
   const saved = []
   for (const [i, result] of out.results.entries()) {
     const info = sniffImage(result.bytes)
@@ -200,7 +208,7 @@ async function commonGenerate(input, context, ctx, { slot = '', progress } = {})
       writeFileSync(dump, result.bytes)
       throw new Error(failureReport('验证', `第 ${i + 1} 张不是有效 PNG/JPEG（原字节已留存 ${dump}）`))
     }
-    const record = saveAsset(LIB_ROOT, result.bytes, {
+    const record = saveAsset(libRoot(), result.bytes, {
       sessionId,
       sessionTitle,
       projectDirectory,
@@ -232,9 +240,9 @@ async function commonGenerate(input, context, ctx, { slot = '', progress } = {})
   const where = iface.kind === 'local' ? `本地 ComfyUI · ${SLOT_LABEL[out.slot] || out.slot}` : `云端 ${iface.baseUrl}`
   const lines = [
     saved.length === 1
-      ? `已生成并入库：${path.join(LIB_ROOT, saved[0].record.file)}`
+      ? `已生成并入库：${path.join(libRoot(), saved[0].record.file)}`
       : `已生成 ${saved.length} 张并入库：`,
-    ...(saved.length === 1 ? [] : saved.map((s, i) => `  ${i + 1}. ${path.join(LIB_ROOT, s.record.file)}`)),
+    ...(saved.length === 1 ? [] : saved.map((s, i) => `  ${i + 1}. ${path.join(libRoot(), s.record.file)}`)),
     `接口 ${iface.name}（${KIND_LABEL[iface.kind]}，${where}）`,
     `模型 ${out.model || model}，请求尺寸 ${out.requestedSize}` +
       `，实际 ${saved[0].info.width}x${saved[0].info.height}` +
@@ -373,7 +381,7 @@ const plugin = {
         },
         options: { namespace: 'image_assets', codemode: false },
         execute: async (input) => {
-          const settings = readSettings(LIB_ROOT)
+          const settings = readSettings(libRoot())
           const list = describeInterfaces(settings)
           const lines = []
           if (!list.length) {
@@ -381,7 +389,7 @@ const plugin = {
           }
           for (const it of list) {
             const iface = settings.interfaces.find((x) => x.id === it.id) || it
-            const resolved = resolveApiKey(LIB_ROOT, iface)
+            const resolved = resolveApiKey(libRoot(), iface)
             const marks = []
             marks.push(it.isDefault ? '★ 默认' : '未设为默认')
             marks.push(it.enabled ? '启用' : '停用')
@@ -408,7 +416,7 @@ const plugin = {
           }
           lines.push('', `默认接口：${settings.defaultInterface || '(未设定：多接口时必须手动指定)'}`)
           lines.push(`默认画幅：${settings.defaultSize}；默认张数：${settings.defaultCount}`)
-          lines.push(`资产库：${LIB_ROOT}`)
+          lines.push(`资产库：${libRoot()}`)
           return { content: lines.join('\n') }
         },
       })

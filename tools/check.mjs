@@ -102,6 +102,9 @@ must(!/https?:\/\/(?!127\.0\.0\.1|localhost)[A-Za-z0-9.-]+\/[A-Za-z0-9/._-]*api/
 must(settingsSrc.includes("defaultInterface"), "配置里有手动默认接口字段");
 must(/interfaces:\s*\[\]/.test(settingsSrc), "新装默认没有预置接口");
 must(settingsSrc.includes("libraryRoot"), "资产库根目录由 libraryRoot 派生，不写死机器路径");
+must(settingsSrc.includes("resolveLibraryRoot") && settingsSrc.includes("readLocator"), "资产库位置支持自定义路径（location.json）持久化");
+must(settingsSrc.includes("validateLibraryRoot"), "切换路径前有共用的路径校验");
+must(!settingsSrc.includes("IMAGE_ASSETS_ROOT_DEFAULT") && !/root\s*=\s*"[A-Za-z]:\\\\?/.test(settingsSrc), "位置解析里没有写死盘符默认值");
 
 const keySrc = fs.existsSync(path.join(sharedDir, "密钥.js"))
   ? fs.readFileSync(path.join(sharedDir, "密钥.js"), "utf8")

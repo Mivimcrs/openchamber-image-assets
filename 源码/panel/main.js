@@ -44,6 +44,13 @@ const state = {
   ifaceDraft: null,    // 正在编辑/新增的接口对象
   ifaceEditing: false,
 
+  // 资产库路径编辑（设置页）
+  rootDraft: '',       // 输入框里的路径
+  rootPending: '',     // 校验通过、等待二次确认的路径
+  rootWarn: '',        // 校验通过但有提示（例如目标已有别的库）
+  rootBusy: false,
+  rootError: '',
+
   draft: {
     refs: [],          // [{id, name}]
     prompt: '',
@@ -144,6 +151,7 @@ async function loadConfig() {
   try {
     state.config = await svc('GET', '/config')
     state.configError = ''
+    state.rootDraft = state.config.root || ''
     const s = state.config.settings || {}
     if (!state.draft.model) state.draft.model = activeInterface()?.defaultModel || ''
     if (!state.draft.size) state.draft.size = s.defaultSize || '1024x1536'
@@ -180,6 +188,18 @@ function activeInterface() {
 function interfaceLabel(it) {
   if (!it) return '（未设定接口）'
   return `${it.name}（${KIND_LABEL[it.kind] || it.kind}）${it.isDefault ? ' ★' : ''}`
+}
+
+/** 存放位置的来源徽标：默认 / 自定义 / 环境变量。 */
+function rootSourceBadge(info) {
+  const map = {
+    default: ['默认', 'cap'],
+    custom: ['自定义', 'cap y'],
+    env: ['环境变量', 'cap q'],
+    explicit: ['临时指定', 'cap q'],
+  }
+  const [label, cls] = map[info?.source] || map.default
+  return `<span class="${cls}" title="${esc(info?.locatorPath || '')}">${label}</span>`
 }
 
 async function loadModels(interfaceId) {
@@ -634,6 +654,7 @@ function renderSettings() {
   const s = cfg?.settings || {}
   const list = interfaces()
   const migration = cfg?.migration
+  const rootInfo = cfg?.rootInfo || { source: 'default', locked: false, custom: '', envRoot: '', defaultRoot: '', pendingMove: null }
   const editingId = state.ifaceEditing ? (state.ifaceDraft?.id || '__new__') : ''
 
   const newDraft = state.ifaceEditing && !(state.ifaceDraft?.id || '') ? state.ifaceDraft : null
@@ -679,12 +700,41 @@ function renderSettings() {
 
     <div class="group">
       <div class="ghead"><span class="gname">数据</span></div>
+      <div class="line"><span class="k">存放位置</span><div class="v">
+        <div class="rootline">
+          <input class="input mono" id="s-root" value="${esc(state.rootDraft || cfg?.root || state.root || '')}" spellcheck="false" ${rootInfo.locked ? 'disabled' : ''} />
+          ${rootSourceBadge(rootInfo)}
+        </div>
+        <div class="row">
+          <button class="btn primary" type="button" data-act="root-check" ${rootInfo.locked || state.rootBusy ? 'disabled' : ''}>保存路径</button>
+          <button class="btn" type="button" data-act="root-default" ${rootInfo.locked || state.rootBusy ? 'disabled' : ''}>恢复默认</button>
+        </div>
+      </div></div>
+      ${state.rootError ? `<div class="bad">${esc(state.rootError)}</div>` : ''}
+      ${state.rootPending ? `<div class="group warnbox">
+        <div class="ghead"><span class="gname">确认切换</span></div>
+        <div class="hint">新位置：<span class="mono">${esc(state.rootPending)}</span></div>
+        ${state.rootWarn ? `<div class="cap q">${esc(state.rootWarn)}</div>` : ''}
+        <div class="hint">「整库搬迁」把图片、索引、接口配置与密钥一起搬过去，新位置立刻可用，源库改名为 <span class="mono">&lt;旧路径&gt;.归档-&lt;时间&gt;</span>（不删除）。</div>
+        <div class="hint">「只切换」不动旧库：新位置是空的，接口与密钥需要重新配置。</div>
+        <div class="row">
+          <button class="btn primary" type="button" data-act="root-move" ${state.rootBusy ? 'disabled' : ''}>整库搬迁过去</button>
+          <button class="btn" type="button" data-act="root-switch" ${state.rootBusy ? 'disabled' : ''}>只切换</button>
+          <button class="btn" type="button" data-act="root-cancel" ${state.rootBusy ? 'disabled' : ''}>取消</button>
+        </div>
+      </div>` : ''}
+      ${rootInfo.pendingMove ? `<div class="group warnbox">
+        <div class="ghead"><span class="gname">上次搬迁未完成</span></div>
+        <div class="hint">源：<span class="mono">${esc(rootInfo.pendingMove.from)}</span></div>
+        <div class="hint">目标：<span class="mono">${esc(rootInfo.pendingMove.to)}</span></div>
+        <div class="row"><button class="btn" type="button" data-act="root-resume" ${state.rootBusy ? 'disabled' : ''}>继续搬迁</button></div>
+      </div>` : ''}
       <dl class="meta">
-        <dt>资产库</dt><dd class="mono">${esc(cfg?.root || state.root || '-')}</dd>
         <dt>配置</dt><dd class="mono">${esc((cfg?.root || state.root || '') + '\\配置\\settings.json')}</dd>
         <dt>密钥</dt><dd class="mono">${esc((cfg?.root || state.root || '') + '\\配置\\密钥\\<接口id>.dat')}</dd>
         <dt>资产</dt><dd>${state.assets.length} 张</dd>
       </dl>
+      <div class="hint">没特别指定时一律存到上面这个自定义路径；环境变量 IMAGE_ASSETS_ROOT 优先于面板设置，出厂默认是 <span class="mono">${esc(rootInfo.defaultRoot || '')}</span>。</div>
       <div class="hint">密钥用 Windows DPAPI 加密，只有当前 Windows 用户能解开；面板与日志都拿不到明文。换用户或重装系统需重新输入。</div>
     </div>
   </div>`
@@ -858,6 +908,116 @@ function renderSettings() {
     }
     renderSettings()
   }))
+
+  // ---- 资产库存放路径 ----
+
+  view.querySelector('#s-root')?.addEventListener('input', (e) => {
+    state.rootDraft = e.target.value
+    state.rootError = ''
+  })
+
+  view.querySelector('[data-act="root-check"]')?.addEventListener('click', async () => {
+    const raw = (view.querySelector('#s-root')?.value || '').trim()
+    state.rootDraft = raw
+    state.rootError = ''
+    if (!raw) { state.rootError = '路径不能为空'; renderSettings(); return }
+    try {
+      const verdict = await svc('POST', '/root/check', { root: raw })
+      if (!verdict.ok) {
+        state.rootError = verdict.error || '路径不可用'
+        state.rootPending = ''
+        state.rootWarn = ''
+      } else {
+        state.rootPending = verdict.root
+        state.rootWarn = verdict.warning || ''
+        await toast('info', '确认下面两步，才会真正切换')
+      }
+    } catch (err) {
+      state.rootError = describeHostError(err)
+    }
+    renderSettings()
+  })
+
+  view.querySelector('[data-act="root-cancel"]')?.addEventListener('click', () => {
+    state.rootPending = ''
+    state.rootWarn = ''
+    state.rootError = ''
+    state.rootDraft = state.config?.root || ''
+    renderSettings()
+  })
+
+  for (const [act, migrate] of [['root-move', true], ['root-switch', false]]) {
+    view.querySelector(`[data-act="${act}"]`)?.addEventListener('click', async () => {
+      const target = state.rootPending
+      if (!target) return
+      state.rootBusy = true
+      state.rootError = ''
+      renderSettings()
+      await toast('info', migrate ? '正在整库搬迁，图片多时需要一会儿…' : '正在切换资产库…')
+      try {
+        const next = await svc('POST', '/root', { root: target, migrate })
+        state.config = next
+        state.rootDraft = next.root || target
+        state.rootPending = ''
+        state.rootWarn = ''
+        imgCache.clear()
+        refCache.clear()
+        await toast('success', migrate
+          ? `已搬迁到新位置（${next.moved?.files ?? 0} 个文件）；源库已归档`
+          : '已切换（旧库原样保留，接口与密钥需在新库重配）')
+        await refresh()
+      } catch (err) {
+        state.rootError = describeHostError(err)
+        await toast('error', '切换失败：' + state.rootError)
+      } finally {
+        state.rootBusy = false
+      }
+      renderSettings()
+    })
+  }
+
+  view.querySelector('[data-act="root-resume"]')?.addEventListener('click', async () => {
+    const info = state.config?.rootInfo?.pendingMove
+    if (!info) return
+    state.rootBusy = true
+    renderSettings()
+    try {
+      const next = await svc('POST', '/root', { root: info.to, migrate: true })
+      state.config = next
+      state.rootDraft = next.root || ''
+      imgCache.clear()
+      refCache.clear()
+      await toast('success', '上次未完成的搬迁已续完')
+      await refresh()
+    } catch (err) {
+      state.rootError = describeHostError(err)
+      await toast('error', '续搬失败：' + state.rootError)
+    } finally {
+      state.rootBusy = false
+    }
+    renderSettings()
+  })
+
+  view.querySelector('[data-act="root-default"]')?.addEventListener('click', async () => {
+    state.rootBusy = true
+    state.rootError = ''
+    renderSettings()
+    try {
+      const next = await svc('POST', '/root/reset', {})
+      state.config = next
+      state.rootDraft = next.root || ''
+      state.rootPending = ''
+      state.rootWarn = ''
+      await toast('success', '已恢复出厂默认位置（旧库未删除）')
+      await refresh()
+    } catch (err) {
+      state.rootError = describeHostError(err)
+      await toast('error', '恢复默认失败：' + state.rootError)
+    } finally {
+      state.rootBusy = false
+    }
+    renderSettings()
+  })
 
   // ---- 默认值 ----
 

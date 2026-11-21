@@ -96,8 +96,16 @@ https://github.com/<owner>/openchamber-image-assets
 
 ## 资产库位置
 
-默认 `<用户主目录>/openchamber-image-assets/`（例如 `C:\Users\你的用户名\openchamber-image-assets\`），
-可用环境变量 `IMAGE_ASSETS_ROOT` 指向任意目录（升级前已经在别的盘用的库就指过去）。
+位置解析顺序（没有特别要求时走自定义路径）：
+
+1. 调用时显式指定（内部工具用）
+2. 环境变量 `IMAGE_ASSETS_ROOT`
+3. **自定义存放路径**（面板「设置 → 数据 → 存放位置」里保存的，存在库外的 `location.json`）
+4. 出厂默认 `<用户主目录>/openchamber-image-assets/`（例如 `C:\Users\你的用户名\openchamber-image-assets\`）
+
+面板里可以随时改：填好路径 → 校验 → 二选一确认。**整库搬迁**把图片、索引、接口配置与密钥一起搬过去，
+源库改名为 `<旧路径>.归档-<时间>`（不删除）；**只切换**保留旧库，新库需要重新配置接口与密钥。
+搬迁可中断可续，面板会提示未完成的标记。保存后立即生效，插件与面板都不用重启。
 
 - `图片/`：生成的 PNG/JPEG
 - `索引/`：`<id>.json` 记录（会话、提示词、模型、尺寸、参考图、用量、标签、备注）

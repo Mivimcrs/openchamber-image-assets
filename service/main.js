@@ -339,6 +339,125 @@ function insideLibrary(root, rel) {
   const abs = path.resolve(root, rel);
   return abs.startsWith(path.resolve(root) + path.sep) ? abs : null;
 }
+var MOVE_MARKER_DIR = ".\u642C\u5BB6\u4E2D";
+var MOVE_MARKER = "move.json";
+var LIB_ENTRIES = ["\u56FE\u7247", "\u7D22\u5F15", "\u914D\u7F6E", "\u8FD0\u884C\u65F6"];
+function countFiles(dir) {
+  let n = 0;
+  let bytes = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return { files: 0, bytes: 0 };
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      const sub = countFiles(path.join(dir, e.name));
+      n += sub.files;
+      bytes += sub.bytes;
+    } else {
+      n += 1;
+      try {
+        bytes += fs.statSync(path.join(dir, e.name)).size;
+      } catch {
+      }
+    }
+  }
+  return { files: n, bytes };
+}
+function copyTree(src, dst, onProgress) {
+  const st = fs.statSync(src);
+  if (st.isDirectory()) {
+    fs.mkdirSync(dst, { recursive: true });
+    for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+      copyTree(path.join(src, e.name), path.join(dst, e.name), onProgress);
+    }
+    return;
+  }
+  if (fs.existsSync(dst) && fs.statSync(dst).size === st.size) {
+    onProgress?.("skip", src);
+    return;
+  }
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.copyFileSync(src, dst);
+  onProgress?.("copy", src);
+}
+function readMarker(to) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(to, MOVE_MARKER_DIR, MOVE_MARKER), "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writeMarker(to, doc) {
+  const dir = path.join(to, MOVE_MARKER_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, MOVE_MARKER), JSON.stringify(doc, null, 2), "utf8");
+}
+function clearMarker(to) {
+  try {
+    fs.rmSync(path.join(to, MOVE_MARKER_DIR), { recursive: true, force: true });
+  } catch {
+  }
+}
+function moveLibrary(from, to, opts = {}) {
+  const src = path.resolve(from);
+  const dst = path.resolve(to);
+  if (src === dst) throw new Error("\u6E90\u4E0E\u76EE\u6807\u662F\u540C\u4E00\u4E2A\u76EE\u5F55");
+  if (dst.startsWith(src + path.sep)) throw new Error("\u76EE\u6807\u4E0D\u80FD\u653E\u5728\u6E90\u5E93\u91CC\u9762");
+  if (!fs.existsSync(src)) throw new Error(`\u6E90\u5E93\u4E0D\u5B58\u5728\uFF1A${src}`);
+  const warnings = [];
+  const existing = readMarker(dst);
+  if (!existing && fs.existsSync(path.join(dst, "\u7D22\u5F15")) && fs.readdirSync(path.join(dst, "\u7D22\u5F15")).length) {
+    throw new Error(`\u76EE\u6807\u4F4D\u7F6E\u5DF2\u7ECF\u6709\u8D44\u4EA7\u5E93\uFF08${dst}\uFF09\uFF1A\u8BF7\u6362\u4E00\u4E2A\u7A7A\u76EE\u5F55\uFF0C\u6216\u5148\u628A\u90A3\u8FB9\u7684\u5E93\u632A\u8D70`);
+  }
+  const stamp2 = (opts.now ? new Date(opts.now) : /* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const resumed = Boolean(existing && path.resolve(existing.from) === src);
+  if (existing && !resumed) {
+    throw new Error(`\u76EE\u6807\u4F4D\u7F6E\u6709\u672A\u5B8C\u6210\u7684\u642C\u8FC1\u6807\u8BB0\uFF08\u6E90 ${existing.from}\uFF09\uFF1A\u5148\u786E\u8BA4\u90A3\u6B21\u642C\u8FC1\uFF0C\u6216\u6362\u4E00\u4E2A\u76EE\u6807\u76EE\u5F55`);
+  }
+  if (!resumed) writeMarker(dst, { version: 1, from: src, to: dst, startedAt: Date.now() });
+  opts.onProgress?.(resumed ? "\u7EE7\u7EED\u4E0A\u6B21\u672A\u5B8C\u6210\u7684\u642C\u8FC1\u2026" : "\u5F00\u59CB\u590D\u5236\u8D44\u4EA7\u5E93\u2026");
+  for (const name of LIB_ENTRIES) {
+    const s = path.join(src, name);
+    if (!fs.existsSync(s)) continue;
+    opts.onProgress?.(`\u590D\u5236 ${name}\u2026`);
+    copyTree(s, path.join(dst, name));
+  }
+  let files = 0;
+  let bytes = 0;
+  for (const name of LIB_ENTRIES) {
+    const s = path.join(src, name);
+    if (!fs.existsSync(s)) continue;
+    const a = countFiles(s);
+    const b = countFiles(path.join(dst, name));
+    files += b.files;
+    bytes += b.bytes;
+    if (a.files !== b.files || a.bytes !== b.bytes) {
+      throw new Error(`\u642C\u8FC1\u6821\u9A8C\u5931\u8D25\uFF08${name}\uFF09\uFF1A\u6E90 ${a.files} \u4E2A\u6587\u4EF6/${a.bytes}B\uFF0C\u76EE\u6807 ${b.files}/${b.bytes}B\u3002\u6807\u8BB0\u5DF2\u4FDD\u7559\uFF0C\u53EF\u91CD\u8BD5\u7EED\u4F20`);
+    }
+  }
+  let backup = "";
+  if (opts.keepSource !== true) {
+    const target = `${src}.\u5F52\u6863-${stamp2}`;
+    try {
+      fs.renameSync(src, target);
+      backup = target;
+    } catch (err) {
+      warnings.push(`\u6E90\u5E93\u6539\u540D\u5931\u8D25\uFF08${err?.message || err}\uFF09\uFF1A\u5DF2\u590D\u5236\u5230\u65B0\u4F4D\u7F6E\uFF0C\u6E90\u5E93\u4FDD\u6301\u539F\u6837\uFF0C\u8BF7\u624B\u52A8\u5F52\u6863`);
+    }
+  } else {
+    backup = src;
+  }
+  clearMarker(dst);
+  opts.onProgress?.("\u642C\u8FC1\u5B8C\u6210");
+  return { action: resumed ? "resumed" : "moved", from: src, to: dst, files, bytes, backup, warnings };
+}
+function pendingMove(root) {
+  const m = readMarker(path.resolve(root));
+  return m && typeof m.from === "string" ? { from: m.from, to: m.to, startedAt: Number(m.startedAt) || 0 } : null;
+}
 
 // ../../../../.config/openchamber/extensions/image-assets/源码/共享/校验.js
 var PNG_MAGIC = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -393,10 +512,128 @@ import path2 from "node:path";
 import crypto from "node:crypto";
 var SETTINGS_VERSION = 2;
 var LIBRARY_DIR_NAME = "openchamber-image-assets";
-function libraryRoot(env = process.env, home = os.homedir()) {
-  const fromEnv = typeof env?.IMAGE_ASSETS_ROOT === "string" ? env.IMAGE_ASSETS_ROOT.trim() : "";
-  if (fromEnv) return path2.resolve(fromEnv);
-  return path2.join(home, LIBRARY_DIR_NAME);
+var LOCATOR_FILE_NAME = "location.json";
+function locatorDir(env = process.env, home = os.homedir()) {
+  const xdg = typeof env?.XDG_CONFIG_HOME === "string" ? env.XDG_CONFIG_HOME.trim() : "";
+  if (xdg) return path2.join(path2.resolve(xdg), LIBRARY_DIR_NAME);
+  const appData = typeof env?.APPDATA === "string" ? env.APPDATA.trim() : "";
+  if (process.platform === "win32" && appData) return path2.join(path2.resolve(appData), LIBRARY_DIR_NAME);
+  return path2.join(home, ".config", LIBRARY_DIR_NAME);
+}
+function locatorPath(env = process.env, home = os.homedir()) {
+  return path2.join(locatorDir(env, home), LOCATOR_FILE_NAME);
+}
+function readLocator(env = process.env, home = os.homedir()) {
+  try {
+    const raw = JSON.parse(fs2.readFileSync(locatorPath(env, home), "utf8"));
+    if (raw && typeof raw.root === "string" && raw.root.trim()) {
+      return { root: path2.resolve(raw.root.trim()), updatedAt: Number(raw.updatedAt) || 0 };
+    }
+  } catch {
+  }
+  return { root: "", updatedAt: 0 };
+}
+function writeLocator(root, env = process.env, home = os.homedir(), now = Date.now()) {
+  const target = path2.resolve(String(root || "").trim());
+  if (!target) throw new Error("\u8D44\u4EA7\u5E93\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A");
+  const file = locatorPath(env, home);
+  fs2.mkdirSync(path2.dirname(file), { recursive: true });
+  const tmp = `${file}.${Math.random().toString(36).slice(2)}.tmp`;
+  fs2.writeFileSync(tmp, JSON.stringify({ version: 1, root: target, updatedAt: now }, null, 2), "utf8");
+  fs2.renameSync(tmp, file);
+  return target;
+}
+function clearLocator(env = process.env, home = os.homedir()) {
+  try {
+    fs2.rmSync(locatorPath(env, home), { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function resolveLibraryRoot(opts = {}) {
+  const env = opts.env || process.env;
+  const home = opts.home || os.homedir();
+  const explicit = typeof opts.explicit === "string" ? opts.explicit.trim() : "";
+  const envRoot = typeof env?.IMAGE_ASSETS_ROOT === "string" ? env.IMAGE_ASSETS_ROOT.trim() : "";
+  const loc = readLocator(env, home);
+  const fallback = path2.join(home, LIBRARY_DIR_NAME);
+  const out = {
+    custom: loc.root,
+    envRoot: envRoot ? path2.resolve(envRoot) : "",
+    defaultRoot: fallback,
+    updatedAt: loc.updatedAt
+  };
+  if (explicit) return { ...out, root: path2.resolve(explicit), source: "explicit" };
+  if (envRoot) return { ...out, root: path2.resolve(envRoot), source: "env" };
+  if (loc.root) return { ...out, root: loc.root, source: "custom" };
+  return { ...out, root: fallback, source: "default" };
+}
+function validateLibraryRoot(candidate, opts = {}) {
+  const raw = typeof candidate === "string" ? candidate.trim() : "";
+  if (!raw) return { ok: false, error: "\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A", root: "" };
+  let target;
+  try {
+    target = path2.resolve(raw);
+  } catch {
+    return { ok: false, error: "\u8DEF\u5F84\u4E0D\u5408\u6CD5", root: "" };
+  }
+  if (path2.isAbsolute(target) === false) return { ok: false, error: "\u9700\u8981\u7EDD\u5BF9\u8DEF\u5F84", root: "" };
+  if (/^[A-Za-z]:$/.test(target) || target === path2.parse(target).root) {
+    return { ok: false, error: "\u4E0D\u80FD\u628A\u76D8\u7B26\u6839\u76EE\u5F55\u5F53\u8D44\u4EA7\u5E93", root: "" };
+  }
+  if (target.length > 520) return { ok: false, error: "\u8DEF\u5F84\u8FC7\u957F\uFF08\u4E0A\u9650 520 \u4E2A\u5B57\u7B26\uFF09", root: "" };
+  if (/^[.~]/.test(target.split(path2.sep).pop() || "") && !path2.isAbsolute(raw)) {
+    return { ok: false, error: "\u9700\u8981\u7EDD\u5BF9\u8DEF\u5F84", root: "" };
+  }
+  const fromEnv = typeof (opts.env || process.env)?.IMAGE_ASSETS_ROOT === "string" ? (opts.env || process.env).IMAGE_ASSETS_ROOT.trim() : "";
+  if (fromEnv && path2.resolve(fromEnv) === target) {
+    return { ok: false, error: "\u5F53\u524D\u88AB\u73AF\u5883\u53D8\u91CF IMAGE_ASSETS_ROOT \u8986\u76D6\uFF1A\u6539\u73AF\u5883\u53D8\u91CF\u6216\u5148\u6E05\u6389\u5B83\uFF0C\u9762\u677F\u4FDD\u5B58\u4E0D\u4F1A\u751F\u6548", root: target };
+  }
+  if (opts.currentRoot && path2.resolve(opts.currentRoot) === target) {
+    return { ok: false, error: "\u8FD9\u5C31\u662F\u5F53\u524D\u8DEF\u5F84\uFF0C\u65E0\u9700\u5207\u6362", root: target };
+  }
+  if (opts.extRoot && path2.resolve(target).startsWith(path2.resolve(opts.extRoot) + path2.sep)) {
+    return { ok: false, error: "\u4E0D\u80FD\u653E\u5728\u6269\u5C55\u5B89\u88C5\u76EE\u5F55\u91CC\uFF08\u5BBF\u4E3B\u66F4\u65B0\u4F1A\u6574\u4EFD\u66FF\u6362\uFF09", root: target };
+  }
+  if (opts.currentRoot && target.startsWith(path2.resolve(opts.currentRoot) + path2.sep)) {
+    return { ok: false, error: "\u4E0D\u80FD\u653E\u5728\u5F53\u524D\u8D44\u4EA7\u5E93\u91CC\u9762\uFF08\u8BF7\u9009\u5E93\u5916\u9762\u7684\u8DEF\u5F84\uFF09", root: target };
+  }
+  let st = null;
+  try {
+    st = fs2.statSync(target);
+  } catch {
+  }
+  if (st && !st.isDirectory()) return { ok: false, error: `\u8BE5\u8DEF\u5F84\u5DF2\u5B58\u5728\u4F46\u4E0D\u662F\u76EE\u5F55\uFF1A${target}`, root: target };
+  if (st?.isDirectory()) {
+    try {
+      const probe = path2.join(target, `.write-probe-${Math.random().toString(36).slice(2)}`);
+      fs2.mkdirSync(probe);
+      try {
+        fs2.rmSync(probe, { recursive: true, force: true, maxRetries: 3, retryDelay: 60 });
+      } catch {
+      }
+    } catch (err) {
+      return { ok: false, error: `\u76EE\u5F55\u4E0D\u53EF\u5199\uFF1A${err?.message || err}`, root: target };
+    }
+    const idx = path2.join(target, "\u7D22\u5F15");
+    let hasOther = false;
+    try {
+      hasOther = fs2.existsSync(idx) && fs2.readdirSync(idx).length > 0;
+    } catch {
+    }
+    if (hasOther) {
+      return { ok: true, warning: "\u8BE5\u4F4D\u7F6E\u5DF2\u7ECF\u6709\u4E00\u4E2A\u8D44\u4EA7\u5E93\uFF1A\u6574\u5E93\u642C\u8FC1\u4F1A\u88AB\u62D2\u7EDD\uFF0C\u53EA\u5207\u6362\u5219\u4F1A\u76F4\u63A5\u7528\u5B83", error: "", root: target };
+    }
+  } else {
+    const parent = path2.dirname(target);
+    try {
+      fs2.accessSync(parent, fs2.constants.W_OK);
+    } catch {
+      return { ok: false, error: `\u4E0A\u7EA7\u76EE\u5F55\u4E0D\u53EF\u5199\u6216\u4E0D\u5B58\u5728\uFF1A${parent}`, root: target };
+    }
+  }
+  return { ok: true, error: "", root: target };
 }
 var INTERFACE_KINDS = ["cloud", "local"];
 var KIND_LABEL = { cloud: "\u4E91\u7AEF API", local: "\u672C\u5730 ComfyUI" };
@@ -1647,18 +1884,31 @@ async function generateLocal(opts, onProgress) {
 // ../../../../.config/openchamber/extensions/image-assets/源码/service/main.js
 var HERE = path6.dirname(fileURLToPath(import.meta.url));
 var EXT_ROOT = path6.resolve(HERE, "..");
-var ROOT = libraryRoot();
 var PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT || 0);
 var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN || "";
 var MAX_BODY = 1024 * 1024;
 var WATCH_INTERVAL_MS = 2e3;
 var JOB_KEEP = 30;
+var library = resolveLibraryRoot();
+var ROOT = library.root;
 var paths = ensureLibrary(ROOT);
 var bootMigration = { migrated: false, warnings: [], backups: {} };
-try {
-  bootMigration = migrateIfNeeded(ROOT);
-} catch (err) {
-  bootMigration = { migrated: false, warnings: [`\u8FC1\u79FB\u5931\u8D25\uFF1A${err?.message || err}`], backups: {} };
+function applyMigration(root) {
+  try {
+    return migrateIfNeeded(root);
+  } catch (err) {
+    return { migrated: false, warnings: [`\u8FC1\u79FB\u5931\u8D25\uFF1A${err?.message || err}`], backups: {} };
+  }
+}
+bootMigration = applyMigration(ROOT);
+function reloadLibrary(explicitRoot = "") {
+  const next = resolveLibraryRoot({ explicit: explicitRoot });
+  ROOT = next.root;
+  library = next;
+  paths = ensureLibrary(ROOT);
+  bootMigration = applyMigration(ROOT);
+  resetWatchSignature();
+  return next;
 }
 var serviceHost = null;
 try {
@@ -1767,7 +2017,19 @@ function configView() {
     comfyAspects: COMFY_ASPECTS.map((a) => ({ label: a.label, value: a.value })),
     workflowSlots: SLOTS.map((s) => ({ value: s, label: SLOT_LABEL[s] })),
     migration: bootMigration.migrated ? { ran: true, warnings: bootMigration.warnings, backups: bootMigration.backups } : bootMigration.warnings?.length ? { ran: false, warnings: bootMigration.warnings, backups: bootMigration.backups } : null,
-    root: ROOT
+    root: ROOT,
+    rootSource: library.source,
+    rootInfo: {
+      source: library.source,
+      custom: library.custom,
+      envRoot: library.envRoot,
+      defaultRoot: library.defaultRoot,
+      locatorPath: locatorPath(),
+      updatedAt: library.updatedAt,
+      // 环境变量在时不建议在面板里改路径：改了也不生效
+      locked: library.source === "env",
+      pendingMove: pendingMove(ROOT)
+    }
   };
 }
 var jobs = /* @__PURE__ */ new Map();
@@ -1780,6 +2042,14 @@ function pruneJobs() {
     if (!oldest) break;
     jobs.delete(oldest.id);
   }
+}
+function activeJobCount() {
+  let n = 0;
+  for (const job of jobs.values()) {
+    if (job.status === "done" || job.status === "error") continue;
+    n += 1;
+  }
+  return n;
 }
 function readReference(id) {
   const rec = findAsset(ROOT, id);
@@ -1921,6 +2191,69 @@ var server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/interfaces") {
+      json(res, 200, configView());
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/root/check") {
+      let body;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        json(res, 400, { error: err.message });
+        return;
+      }
+      const verdict = validateLibraryRoot(body?.root, { env: process.env, currentRoot: ROOT, extRoot: EXT_ROOT });
+      json(res, 200, verdict);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/root") {
+      let body;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        json(res, 400, { error: err.message });
+        return;
+      }
+      if (library.source === "env") {
+        json(res, 400, { error: "\u5F53\u524D\u88AB\u73AF\u5883\u53D8\u91CF IMAGE_ASSETS_ROOT \u8986\u76D6\uFF1A\u9762\u677F\u4FDD\u5B58\u4E0D\u4F1A\u751F\u6548\uFF0C\u5148\u6E05\u6389\u8FD9\u4E2A\u73AF\u5883\u53D8\u91CF" });
+        return;
+      }
+      if (activeJobCount() > 0) {
+        json(res, 409, { error: "\u8FD8\u6709\u751F\u6210\u4EFB\u52A1\u5728\u8DD1\uFF1A\u7B49\u5B83\u7ED3\u675F\u518D\u5207\u6362\u8D44\u4EA7\u5E93\uFF0C\u907F\u514D\u65B0\u56FE\u5199\u8FDB\u534A\u9014\u7684\u5E93" });
+        return;
+      }
+      const verdict = validateLibraryRoot(body?.root, { env: process.env, currentRoot: ROOT, extRoot: EXT_ROOT });
+      if (!verdict.ok) {
+        json(res, 400, { error: verdict.error });
+        return;
+      }
+      const migrate = body?.migrate !== false;
+      const from = ROOT;
+      let moved = null;
+      try {
+        if (migrate) {
+          moved = moveLibrary(from, verdict.root);
+        } else {
+          ensureLibrary(verdict.root);
+        }
+        writeLocator(verdict.root);
+      } catch (err) {
+        json(res, 500, { error: `\u5207\u6362\u5931\u8D25\uFF1A${String(err?.message || err)}` });
+        return;
+      }
+      const next = reloadLibrary();
+      void emit("config-changed", { reason: "root", root: next.root });
+      json(res, 200, { ...configView(), moved });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/root/reset") {
+      if (activeJobCount() > 0) {
+        json(res, 409, { error: "\u8FD8\u6709\u751F\u6210\u4EFB\u52A1\u5728\u8DD1\uFF1A\u7B49\u5B83\u7ED3\u675F\u518D\u5207\u6362\u8D44\u4EA7\u5E93" });
+        return;
+      }
+      clearLocator();
+      const next = reloadLibrary();
+      void emit("config-changed", { reason: "root", root: next.root });
       json(res, 200, configView());
       return;
     }
@@ -2281,6 +2614,9 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[image-assets] service listening on 127.0.0.1:${addr.port}, root=${ROOT}`);
 });
 var lastSig = indexSignature();
+function resetWatchSignature() {
+  lastSig = indexSignature();
+}
 var timer = setInterval(() => {
   const sig = indexSignature();
   if (sig !== lastSig) {

@@ -10,6 +10,7 @@ import { checkKey, sniffImage, modelsInclude, pickImageModels, shouldFallbackToU
 import {
   ensureLibrary, scanAssets, saveAsset, findAsset, annotateAsset,
   deleteAsset, filterAssets, makeAssetId, libraryPaths, NOTE_MAX,
+  moveLibrary, pendingMove,
 } from '../源码/共享/资产库.js'
 
 const TMP_ROOT = path.join(os.tmpdir(), '生图扩展测试')
@@ -169,6 +170,84 @@ test('makeAssetId：形如 base36 时间戳-随机串，且唯一', () => {
   const b = makeAssetId(1794296399962, 0.5001)
   assert.notEqual(a, b)
   assert.match(a, /^[0-9a-z]+-[0-9a-z]+$/)
+})
+
+// ---- 整库搬迁 ----
+
+function seedLibrary(root, count = 2) {
+  ensureLibrary(root)
+  for (let i = 0; i < count; i += 1) {
+    saveAsset(root, pngBytes(64 + i, 64), { prompt: `p${i}`, sessionId: 's1' })
+  }
+  return root
+}
+
+test('moveLibrary：整库搬过去，源库改名为归档目录，目标可用且资产数一致', () => {
+  const src = seedLibrary(makeTempLibrary(), 2)
+  const dst = path.join(path.dirname(src), path.basename(src) + '-moved')
+  assert.equal(scanAssets(src).assets.length, 2)
+
+  const res = moveLibrary(src, dst, { now: 1794296399962 })
+  assert.equal(res.action, 'moved')
+  assert.equal(res.files > 0, true)
+  assert.equal(fs.existsSync(src), false, '源库已被改名归档')
+  assert.equal(fs.existsSync(res.backup), true, '归档目录还在（先归档不删）')
+  assert.equal(scanAssets(dst).assets.length, 2, '目标库内容完整')
+  assert.equal(pendingMove(dst), null, '完成后不留搬迁标记')
+  assert.equal(scanAssets(src).assets.length, 0) // 源路径已不存在
+  assert.equal(fs.existsSync(path.join(dst, '索引')), true)
+})
+
+test('moveLibrary：keepSource 时源库原地保留', () => {
+  const src = seedLibrary(makeTempLibrary(), 1)
+  const dst = path.join(path.dirname(src), path.basename(src) + '-copy')
+  const res = moveLibrary(src, dst, { keepSource: true })
+  assert.equal(fs.existsSync(src), true)
+  assert.equal(res.backup, src)
+  assert.equal(scanAssets(dst).assets.length, 1)
+})
+
+test('moveLibrary：拒绝目标已有别的库、目标在源库内、源不存在', () => {
+  const src = seedLibrary(makeTempLibrary(), 1)
+  const dst = seedLibrary(makeTempLibrary(), 1) // 已有内容
+  assert.throws(() => moveLibrary(src, dst), /已经有资产库/)
+  assert.throws(() => moveLibrary(src, path.join(src, 'nested')), /里面/)
+  assert.throws(() => moveLibrary(path.join(src, 'nope'), dst), /源库不存在/)
+})
+
+test('moveLibrary：目标里有未完成标记时，只允许同一来源续传', () => {
+  const src = seedLibrary(makeTempLibrary(), 1)
+  const dst = path.join(path.dirname(src), path.basename(src) + '-resume')
+  fs.mkdirSync(path.join(dst, '.搬家中'), { recursive: true })
+  fs.writeFileSync(
+    path.join(dst, '.搬家中', 'move.json'),
+    JSON.stringify({ version: 1, from: src, to: dst, startedAt: 1 }),
+    'utf8',
+  )
+  const res = moveLibrary(src, dst)
+  assert.equal(res.action, 'resumed')
+  assert.equal(scanAssets(dst).assets.length, 1)
+  assert.equal(pendingMove(dst), null)
+})
+
+test('moveLibrary：目标标记来自另一个源时拒绝，避免把两份数据混在一起', () => {
+  const other = seedLibrary(makeTempLibrary(), 1)
+  const dst = makeTempLibrary()
+  fs.mkdirSync(path.join(dst, '.搬家中'), { recursive: true })
+  fs.writeFileSync(
+    path.join(dst, '.搬家中', 'move.json'),
+    JSON.stringify({ version: 1, from: path.join(dst, 'elsewhere'), to: dst, startedAt: 1 }),
+    'utf8',
+  )
+  assert.throws(() => moveLibrary(other, dst), /未完成的搬迁标记/)
+})
+
+test('pendingMove：没有标记时返回 null，有标记时给出源与目标', () => {
+  const root = makeTempLibrary()
+  assert.equal(pendingMove(root), null)
+  fs.mkdirSync(path.join(root, '.搬家中'), { recursive: true })
+  fs.writeFileSync(path.join(root, '.搬家中', 'move.json'), JSON.stringify({ from: '/a', to: root, startedAt: 5 }), 'utf8')
+  assert.deepEqual(pendingMove(root), { from: '/a', to: root, startedAt: 5 })
 })
 
 test.after(() => {

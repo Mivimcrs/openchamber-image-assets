@@ -1912,6 +1912,15 @@ ${GUEST_UI_LOOK_CSS}`;
     ifaceDraft: null,
     // 正在编辑/新增的接口对象
     ifaceEditing: false,
+    // 资产库路径编辑（设置页）
+    rootDraft: "",
+    // 输入框里的路径
+    rootPending: "",
+    // 校验通过、等待二次确认的路径
+    rootWarn: "",
+    // 校验通过但有提示（例如目标已有别的库）
+    rootBusy: false,
+    rootError: "",
     draft: {
       refs: [],
       // [{id, name}]
@@ -2016,6 +2025,7 @@ ${GUEST_UI_LOOK_CSS}`;
     try {
       state.config = await svc("GET", "/config");
       state.configError = "";
+      state.rootDraft = state.config.root || "";
       const s = state.config.settings || {};
       if (!state.draft.model) state.draft.model = activeInterface()?.defaultModel || "";
       if (!state.draft.size) state.draft.size = s.defaultSize || "1024x1536";
@@ -2046,6 +2056,16 @@ ${GUEST_UI_LOOK_CSS}`;
   function interfaceLabel(it) {
     if (!it) return "\uFF08\u672A\u8BBE\u5B9A\u63A5\u53E3\uFF09";
     return `${it.name}\uFF08${KIND_LABEL[it.kind] || it.kind}\uFF09${it.isDefault ? " \u2605" : ""}`;
+  }
+  function rootSourceBadge(info) {
+    const map = {
+      default: ["\u9ED8\u8BA4", "cap"],
+      custom: ["\u81EA\u5B9A\u4E49", "cap y"],
+      env: ["\u73AF\u5883\u53D8\u91CF", "cap q"],
+      explicit: ["\u4E34\u65F6\u6307\u5B9A", "cap q"]
+    };
+    const [label, cls] = map[info?.source] || map.default;
+    return `<span class="${cls}" title="${esc(info?.locatorPath || "")}">${label}</span>`;
   }
   async function loadModels(interfaceId) {
     const wanted = interfaceId !== void 0 ? interfaceId : activeInterface()?.id || state.config?.defaultInterface || "";
@@ -2462,6 +2482,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const s = cfg?.settings || {};
     const list = interfaces();
     const migration = cfg?.migration;
+    const rootInfo = cfg?.rootInfo || { source: "default", locked: false, custom: "", envRoot: "", defaultRoot: "", pendingMove: null };
     const editingId = state.ifaceEditing ? state.ifaceDraft?.id || "__new__" : "";
     const newDraft = state.ifaceEditing && !(state.ifaceDraft?.id || "") ? state.ifaceDraft : null;
     const cards = list.map((it) => ifaceCard(
@@ -2505,12 +2526,41 @@ ${GUEST_UI_LOOK_CSS}`;
 
     <div class="group">
       <div class="ghead"><span class="gname">\u6570\u636E</span></div>
+      <div class="line"><span class="k">\u5B58\u653E\u4F4D\u7F6E</span><div class="v">
+        <div class="rootline">
+          <input class="input mono" id="s-root" value="${esc(state.rootDraft || cfg?.root || state.root || "")}" spellcheck="false" ${rootInfo.locked ? "disabled" : ""} />
+          ${rootSourceBadge(rootInfo)}
+        </div>
+        <div class="row">
+          <button class="btn primary" type="button" data-act="root-check" ${rootInfo.locked || state.rootBusy ? "disabled" : ""}>\u4FDD\u5B58\u8DEF\u5F84</button>
+          <button class="btn" type="button" data-act="root-default" ${rootInfo.locked || state.rootBusy ? "disabled" : ""}>\u6062\u590D\u9ED8\u8BA4</button>
+        </div>
+      </div></div>
+      ${state.rootError ? `<div class="bad">${esc(state.rootError)}</div>` : ""}
+      ${state.rootPending ? `<div class="group warnbox">
+        <div class="ghead"><span class="gname">\u786E\u8BA4\u5207\u6362</span></div>
+        <div class="hint">\u65B0\u4F4D\u7F6E\uFF1A<span class="mono">${esc(state.rootPending)}</span></div>
+        ${state.rootWarn ? `<div class="cap q">${esc(state.rootWarn)}</div>` : ""}
+        <div class="hint">\u300C\u6574\u5E93\u642C\u8FC1\u300D\u628A\u56FE\u7247\u3001\u7D22\u5F15\u3001\u63A5\u53E3\u914D\u7F6E\u4E0E\u5BC6\u94A5\u4E00\u8D77\u642C\u8FC7\u53BB\uFF0C\u65B0\u4F4D\u7F6E\u7ACB\u523B\u53EF\u7528\uFF0C\u6E90\u5E93\u6539\u540D\u4E3A <span class="mono">&lt;\u65E7\u8DEF\u5F84&gt;.\u5F52\u6863-&lt;\u65F6\u95F4&gt;</span>\uFF08\u4E0D\u5220\u9664\uFF09\u3002</div>
+        <div class="hint">\u300C\u53EA\u5207\u6362\u300D\u4E0D\u52A8\u65E7\u5E93\uFF1A\u65B0\u4F4D\u7F6E\u662F\u7A7A\u7684\uFF0C\u63A5\u53E3\u4E0E\u5BC6\u94A5\u9700\u8981\u91CD\u65B0\u914D\u7F6E\u3002</div>
+        <div class="row">
+          <button class="btn primary" type="button" data-act="root-move" ${state.rootBusy ? "disabled" : ""}>\u6574\u5E93\u642C\u8FC1\u8FC7\u53BB</button>
+          <button class="btn" type="button" data-act="root-switch" ${state.rootBusy ? "disabled" : ""}>\u53EA\u5207\u6362</button>
+          <button class="btn" type="button" data-act="root-cancel" ${state.rootBusy ? "disabled" : ""}>\u53D6\u6D88</button>
+        </div>
+      </div>` : ""}
+      ${rootInfo.pendingMove ? `<div class="group warnbox">
+        <div class="ghead"><span class="gname">\u4E0A\u6B21\u642C\u8FC1\u672A\u5B8C\u6210</span></div>
+        <div class="hint">\u6E90\uFF1A<span class="mono">${esc(rootInfo.pendingMove.from)}</span></div>
+        <div class="hint">\u76EE\u6807\uFF1A<span class="mono">${esc(rootInfo.pendingMove.to)}</span></div>
+        <div class="row"><button class="btn" type="button" data-act="root-resume" ${state.rootBusy ? "disabled" : ""}>\u7EE7\u7EED\u642C\u8FC1</button></div>
+      </div>` : ""}
       <dl class="meta">
-        <dt>\u8D44\u4EA7\u5E93</dt><dd class="mono">${esc(cfg?.root || state.root || "-")}</dd>
         <dt>\u914D\u7F6E</dt><dd class="mono">${esc((cfg?.root || state.root || "") + "\\\u914D\u7F6E\\settings.json")}</dd>
         <dt>\u5BC6\u94A5</dt><dd class="mono">${esc((cfg?.root || state.root || "") + "\\\u914D\u7F6E\\\u5BC6\u94A5\\<\u63A5\u53E3id>.dat")}</dd>
         <dt>\u8D44\u4EA7</dt><dd>${state.assets.length} \u5F20</dd>
       </dl>
+      <div class="hint">\u6CA1\u7279\u522B\u6307\u5B9A\u65F6\u4E00\u5F8B\u5B58\u5230\u4E0A\u9762\u8FD9\u4E2A\u81EA\u5B9A\u4E49\u8DEF\u5F84\uFF1B\u73AF\u5883\u53D8\u91CF IMAGE_ASSETS_ROOT \u4F18\u5148\u4E8E\u9762\u677F\u8BBE\u7F6E\uFF0C\u51FA\u5382\u9ED8\u8BA4\u662F <span class="mono">${esc(rootInfo.defaultRoot || "")}</span>\u3002</div>
       <div class="hint">\u5BC6\u94A5\u7528 Windows DPAPI \u52A0\u5BC6\uFF0C\u53EA\u6709\u5F53\u524D Windows \u7528\u6237\u80FD\u89E3\u5F00\uFF1B\u9762\u677F\u4E0E\u65E5\u5FD7\u90FD\u62FF\u4E0D\u5230\u660E\u6587\u3002\u6362\u7528\u6237\u6216\u91CD\u88C5\u7CFB\u7EDF\u9700\u91CD\u65B0\u8F93\u5165\u3002</div>
     </div>
   </div>`;
@@ -2671,6 +2721,110 @@ ${GUEST_UI_LOOK_CSS}`;
       }
       renderSettings();
     }));
+    view.querySelector("#s-root")?.addEventListener("input", (e) => {
+      state.rootDraft = e.target.value;
+      state.rootError = "";
+    });
+    view.querySelector('[data-act="root-check"]')?.addEventListener("click", async () => {
+      const raw = (view.querySelector("#s-root")?.value || "").trim();
+      state.rootDraft = raw;
+      state.rootError = "";
+      if (!raw) {
+        state.rootError = "\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A";
+        renderSettings();
+        return;
+      }
+      try {
+        const verdict = await svc("POST", "/root/check", { root: raw });
+        if (!verdict.ok) {
+          state.rootError = verdict.error || "\u8DEF\u5F84\u4E0D\u53EF\u7528";
+          state.rootPending = "";
+          state.rootWarn = "";
+        } else {
+          state.rootPending = verdict.root;
+          state.rootWarn = verdict.warning || "";
+          await toast("info", "\u786E\u8BA4\u4E0B\u9762\u4E24\u6B65\uFF0C\u624D\u4F1A\u771F\u6B63\u5207\u6362");
+        }
+      } catch (err) {
+        state.rootError = describeHostError(err);
+      }
+      renderSettings();
+    });
+    view.querySelector('[data-act="root-cancel"]')?.addEventListener("click", () => {
+      state.rootPending = "";
+      state.rootWarn = "";
+      state.rootError = "";
+      state.rootDraft = state.config?.root || "";
+      renderSettings();
+    });
+    for (const [act, migrate] of [["root-move", true], ["root-switch", false]]) {
+      view.querySelector(`[data-act="${act}"]`)?.addEventListener("click", async () => {
+        const target = state.rootPending;
+        if (!target) return;
+        state.rootBusy = true;
+        state.rootError = "";
+        renderSettings();
+        await toast("info", migrate ? "\u6B63\u5728\u6574\u5E93\u642C\u8FC1\uFF0C\u56FE\u7247\u591A\u65F6\u9700\u8981\u4E00\u4F1A\u513F\u2026" : "\u6B63\u5728\u5207\u6362\u8D44\u4EA7\u5E93\u2026");
+        try {
+          const next = await svc("POST", "/root", { root: target, migrate });
+          state.config = next;
+          state.rootDraft = next.root || target;
+          state.rootPending = "";
+          state.rootWarn = "";
+          imgCache.clear();
+          refCache.clear();
+          await toast("success", migrate ? `\u5DF2\u642C\u8FC1\u5230\u65B0\u4F4D\u7F6E\uFF08${next.moved?.files ?? 0} \u4E2A\u6587\u4EF6\uFF09\uFF1B\u6E90\u5E93\u5DF2\u5F52\u6863` : "\u5DF2\u5207\u6362\uFF08\u65E7\u5E93\u539F\u6837\u4FDD\u7559\uFF0C\u63A5\u53E3\u4E0E\u5BC6\u94A5\u9700\u5728\u65B0\u5E93\u91CD\u914D\uFF09");
+          await refresh();
+        } catch (err) {
+          state.rootError = describeHostError(err);
+          await toast("error", "\u5207\u6362\u5931\u8D25\uFF1A" + state.rootError);
+        } finally {
+          state.rootBusy = false;
+        }
+        renderSettings();
+      });
+    }
+    view.querySelector('[data-act="root-resume"]')?.addEventListener("click", async () => {
+      const info = state.config?.rootInfo?.pendingMove;
+      if (!info) return;
+      state.rootBusy = true;
+      renderSettings();
+      try {
+        const next = await svc("POST", "/root", { root: info.to, migrate: true });
+        state.config = next;
+        state.rootDraft = next.root || "";
+        imgCache.clear();
+        refCache.clear();
+        await toast("success", "\u4E0A\u6B21\u672A\u5B8C\u6210\u7684\u642C\u8FC1\u5DF2\u7EED\u5B8C");
+        await refresh();
+      } catch (err) {
+        state.rootError = describeHostError(err);
+        await toast("error", "\u7EED\u642C\u5931\u8D25\uFF1A" + state.rootError);
+      } finally {
+        state.rootBusy = false;
+      }
+      renderSettings();
+    });
+    view.querySelector('[data-act="root-default"]')?.addEventListener("click", async () => {
+      state.rootBusy = true;
+      state.rootError = "";
+      renderSettings();
+      try {
+        const next = await svc("POST", "/root/reset", {});
+        state.config = next;
+        state.rootDraft = next.root || "";
+        state.rootPending = "";
+        state.rootWarn = "";
+        await toast("success", "\u5DF2\u6062\u590D\u51FA\u5382\u9ED8\u8BA4\u4F4D\u7F6E\uFF08\u65E7\u5E93\u672A\u5220\u9664\uFF09");
+        await refresh();
+      } catch (err) {
+        state.rootError = describeHostError(err);
+        await toast("error", "\u6062\u590D\u9ED8\u8BA4\u5931\u8D25\uFF1A" + state.rootError);
+      } finally {
+        state.rootBusy = false;
+      }
+      renderSettings();
+    });
     view.querySelectorAll("[data-default-size]").forEach((b) => b.addEventListener("click", async () => {
       try {
         state.config = await svc("POST", "/config", { defaultSize: b.dataset.defaultSize });

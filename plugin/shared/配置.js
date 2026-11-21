@@ -13,19 +13,173 @@ import crypto from 'node:crypto'
 
 export const SETTINGS_VERSION = 2
 
-/** 资产库默认目录名（放在用户主目录下）；可用环境变量 IMAGE_ASSETS_ROOT 覆盖。 */
+/** 资产库默认目录名（放在用户主目录下）；可用环境变量 IMAGE_ASSETS_ROOT 或自定义路径覆盖。 */
 export const LIBRARY_DIR_NAME = 'openchamber-image-assets'
 
+/** 位置指针文件名（放在库外，换路径时它自己不会被搬走）。 */
+export const LOCATOR_FILE_NAME = 'location.json'
+
 /**
- * 资产库根目录：环境变量 IMAGE_ASSETS_ROOT 优先，否则 `<用户主目录>/openchamber-image-assets`。
- * 不写死任何机器路径，换一台机器也能用；升级前已在别处的库用环境变量指过去。
+ * 位置指针所在目录：`<配置根>/openchamber-image-assets`。
+ * Windows 用 %APPDATA%，其它平台用 $XDG_CONFIG_HOME 或 ~/.config。
+ * @param {object} [env]
+ * @param {string} [home]
+ */
+export function locatorDir(env = process.env, home = os.homedir()) {
+  const xdg = typeof env?.XDG_CONFIG_HOME === 'string' ? env.XDG_CONFIG_HOME.trim() : ''
+  if (xdg) return path.join(path.resolve(xdg), LIBRARY_DIR_NAME)
+  const appData = typeof env?.APPDATA === 'string' ? env.APPDATA.trim() : ''
+  if (process.platform === 'win32' && appData) return path.join(path.resolve(appData), LIBRARY_DIR_NAME)
+  return path.join(home, '.config', LIBRARY_DIR_NAME)
+}
+
+/** 位置指针文件路径。 */
+export function locatorPath(env = process.env, home = os.homedir()) {
+  return path.join(locatorDir(env, home), LOCATOR_FILE_NAME)
+}
+
+/** 出厂默认资产库：`<用户主目录>/openchamber-image-assets`。 */
+export function defaultLibraryRoot(home = os.homedir()) {
+  return path.join(home, LIBRARY_DIR_NAME)
+}
+
+/**
+ * 读自定义存放路径（location.json）。读不到 / 坏 JSON / root 非法都返回 ''。
+ * @returns {{root: string, updatedAt: number}}
+ */
+export function readLocator(env = process.env, home = os.homedir()) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(locatorPath(env, home), 'utf8'))
+    if (raw && typeof raw.root === 'string' && raw.root.trim()) {
+      return { root: path.resolve(raw.root.trim()), updatedAt: Number(raw.updatedAt) || 0 }
+    }
+  } catch { /* 没设过或文件坏了 */ }
+  return { root: '', updatedAt: 0 }
+}
+
+/** 写自定义存放路径（原子写）。返回写入的 root。 */
+export function writeLocator(root, env = process.env, home = os.homedir(), now = Date.now()) {
+  const target = path.resolve(String(root || '').trim())
+  if (!target) throw new Error('资产库路径不能为空')
+  const file = locatorPath(env, home)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${Math.random().toString(36).slice(2)}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, root: target, updatedAt: now }, null, 2), 'utf8')
+  fs.renameSync(tmp, file)
+  return target
+}
+
+/** 清掉自定义存放路径（回落到出厂默认）。返回是否真的删掉了文件。 */
+export function clearLocator(env = process.env, home = os.homedir()) {
+  try {
+    fs.rmSync(locatorPath(env, home), { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 资产库根目录，四档解析：
+ *   调用时显式给的 > 环境变量 IMAGE_ASSETS_ROOT > 自定义路径（location.json） > 出厂默认
+ * 「没有要求时走自定义路径」——显式与环境变量算有要求。
+ * @param {{explicit?: string, env?: object, home?: string}} [opts]
+ * @returns {{root: string, source: 'explicit'|'env'|'custom'|'default', custom: string, envRoot: string, defaultRoot: string, updatedAt: number}}
+ */
+export function resolveLibraryRoot(opts = {}) {
+  const env = opts.env || process.env
+  const home = opts.home || os.homedir()
+  const explicit = typeof opts.explicit === 'string' ? opts.explicit.trim() : ''
+  const envRoot = typeof env?.IMAGE_ASSETS_ROOT === 'string' ? env.IMAGE_ASSETS_ROOT.trim() : ''
+  const loc = readLocator(env, home)
+  const fallback = path.join(home, LIBRARY_DIR_NAME)
+  const out = {
+    custom: loc.root,
+    envRoot: envRoot ? path.resolve(envRoot) : '',
+    defaultRoot: fallback,
+    updatedAt: loc.updatedAt,
+  }
+  if (explicit) return { ...out, root: path.resolve(explicit), source: 'explicit' }
+  if (envRoot) return { ...out, root: path.resolve(envRoot), source: 'env' }
+  if (loc.root) return { ...out, root: loc.root, source: 'custom' }
+  return { ...out, root: fallback, source: 'default' }
+}
+
+/**
+ * 兼容旧签名：直接拿根目录字符串。
  * @param {object} [env]
  * @param {string} [home]
  */
 export function libraryRoot(env = process.env, home = os.homedir()) {
-  const fromEnv = typeof env?.IMAGE_ASSETS_ROOT === 'string' ? env.IMAGE_ASSETS_ROOT.trim() : ''
-  if (fromEnv) return path.resolve(fromEnv)
-  return path.join(home, LIBRARY_DIR_NAME)
+  return resolveLibraryRoot({ env, home }).root
+}
+
+/**
+ * 校验一个候选资产库根目录，给面板与 service 共用（不建目录、不写盘）。
+ * @returns {{ok: boolean, error: string, root: string}}
+ */
+export function validateLibraryRoot(candidate, opts = {}) {
+  const raw = typeof candidate === 'string' ? candidate.trim() : ''
+  if (!raw) return { ok: false, error: '路径不能为空', root: '' }
+  let target
+  try {
+    target = path.resolve(raw)
+  } catch {
+    return { ok: false, error: '路径不合法', root: '' }
+  }
+  if (path.isAbsolute(target) === false) return { ok: false, error: '需要绝对路径', root: '' }
+  // 盘符根 / 单独一个目录分隔符：不拒绝但也不建议，这里明确拒绝，避免把整个盘当库
+  if (/^[A-Za-z]:$/.test(target) || target === path.parse(target).root) {
+    return { ok: false, error: '不能把盘符根目录当资产库', root: '' }
+  }
+  if (target.length > 520) return { ok: false, error: '路径过长（上限 520 个字符）', root: '' }
+  if (/^[.~]/.test(target.split(path.sep).pop() || '') && !path.isAbsolute(raw)) {
+    return { ok: false, error: '需要绝对路径', root: '' }
+  }
+  const fromEnv = typeof (opts.env || process.env)?.IMAGE_ASSETS_ROOT === 'string'
+    ? (opts.env || process.env).IMAGE_ASSETS_ROOT.trim()
+    : ''
+  if (fromEnv && path.resolve(fromEnv) === target) {
+    return { ok: false, error: '当前被环境变量 IMAGE_ASSETS_ROOT 覆盖：改环境变量或先清掉它，面板保存不会生效', root: target }
+  }
+  if (opts.currentRoot && path.resolve(opts.currentRoot) === target) {
+    return { ok: false, error: '这就是当前路径，无需切换', root: target }
+  }
+  if (opts.extRoot && path.resolve(target).startsWith(path.resolve(opts.extRoot) + path.sep)) {
+    return { ok: false, error: '不能放在扩展安装目录里（宿主更新会整份替换）', root: target }
+  }
+  // 不能指向当前库内部的子目录：搬迁/切换会自己套自己
+  if (opts.currentRoot && target.startsWith(path.resolve(opts.currentRoot) + path.sep)) {
+    return { ok: false, error: '不能放在当前资产库里面（请选库外面的路径）', root: target }
+  }
+  let st = null
+  try { st = fs.statSync(target) } catch { /* 还不存在，正常 */ }
+  if (st && !st.isDirectory()) return { ok: false, error: `该路径已存在但不是目录：${target}`, root: target }
+  if (st?.isDirectory()) {
+    try {
+      const probe = path.join(target, `.write-probe-${Math.random().toString(36).slice(2)}`)
+      fs.mkdirSync(probe)
+      try { fs.rmSync(probe, { recursive: true, force: true, maxRetries: 3, retryDelay: 60 }) } catch { /* 探针删不掉不影响结论 */ }
+    } catch (err) {
+      return { ok: false, error: `目录不可写：${err?.message || err}`, root: target }
+    }
+    // 目标已经是另一个有内容的资产库：允许（搬迁会拒绝，切换则直接用）
+    const idx = path.join(target, '索引')
+    let hasOther = false
+    try { hasOther = fs.existsSync(idx) && fs.readdirSync(idx).length > 0 } catch { /* 忽略 */ }
+    if (hasOther) {
+      return { ok: true, warning: '该位置已经有一个资产库：整库搬迁会被拒绝，只切换则会直接用它', error: '', root: target }
+    }
+  } else {
+    // 不存在时要能建出来：检查父目录可写
+    const parent = path.dirname(target)
+    try {
+      fs.accessSync(parent, fs.constants.W_OK)
+    } catch {
+      return { ok: false, error: `上级目录不可写或不存在：${parent}`, root: target }
+    }
+  }
+  return { ok: true, error: '', root: target }
 }
 
 export const INTERFACE_KINDS = ['cloud', 'local']

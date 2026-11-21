@@ -16,12 +16,14 @@ import { createServiceHost } from '@openchamber/sdk'
 import {
   ensureLibrary, libraryPaths, scanAssets, findAsset, saveAsset,
   annotateAsset, deleteAsset, filterAssets, insideLibrary, FILE_MB_LIMIT,
+  moveLibrary, pendingMove,
 } from '../共享/资产库.js'
 import { sniffImage } from '../共享/校验.js'
 import {
   readSettings, writeSettings, normalizeSettings, upsertInterface, removeInterface,
   resolveInterface, describeInterfaces, normalizeInterface, defaultComfyConfig,
-  KIND_LABEL, INTERFACE_KINDS, libraryRoot,
+  KIND_LABEL, INTERFACE_KINDS, resolveLibraryRoot, writeLocator, clearLocator,
+  validateLibraryRoot, locatorPath, defaultLibraryRoot,
 } from '../共享/配置.js'
 import {
   resolveApiKey, saveKey, clearStoredKey, maskKey, hasStoredKey, KEY_SOURCE_LABEL, envNameFor,
@@ -35,21 +37,37 @@ import { describeTemplate, SLOTS, SLOT_LABEL } from '../共享/工作流.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const EXT_ROOT = path.resolve(HERE, '..')
-const ROOT = libraryRoot()
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT || 0)
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN || ''
 const MAX_BODY = 1024 * 1024
 const WATCH_INTERVAL_MS = 2000
 const JOB_KEEP = 30
 
-const paths = ensureLibrary(ROOT)
-
-// 启动即做一次 v1 → v2 迁移（幂等：已经是 v2 时什么都不动）
+// 资产库位置：启动时按四档解析（环境变量 > 自定义路径 > 出厂默认），
+// 面板切换路径后原地重载，不重启服务、不影响正在跑的任务。
+let library = resolveLibraryRoot()
+let ROOT = library.root
+let paths = ensureLibrary(ROOT)
 let bootMigration = { migrated: false, warnings: [], backups: {} }
-try {
-  bootMigration = migrateIfNeeded(ROOT)
-} catch (err) {
-  bootMigration = { migrated: false, warnings: [`迁移失败：${err?.message || err}`], backups: {} }
+
+function applyMigration(root) {
+  try {
+    return migrateIfNeeded(root)
+  } catch (err) {
+    return { migrated: false, warnings: [`迁移失败：${err?.message || err}`], backups: {} }
+  }
+}
+bootMigration = applyMigration(ROOT)
+
+/** 重新解析并切换资产库根目录；返回新的解析结果。 */
+function reloadLibrary(explicitRoot = '') {
+  const next = resolveLibraryRoot({ explicit: explicitRoot })
+  ROOT = next.root
+  library = next
+  paths = ensureLibrary(ROOT)
+  bootMigration = applyMigration(ROOT)
+  resetWatchSignature()
+  return next
 }
 
 let serviceHost = null
@@ -174,8 +192,19 @@ function configView() {
     workflowSlots: SLOTS.map((s) => ({ value: s, label: SLOT_LABEL[s] })),
     migration: bootMigration.migrated
       ? { ran: true, warnings: bootMigration.warnings, backups: bootMigration.backups }
-      : (bootMigration.warnings?.length ? { ran: false, warnings: bootMigration.warnings, backups: bootMigration.backups } : null),
-    root: ROOT,
+      : (bootMigration.warnings?.length ? { ran: false, warnings: bootMigration.warnings, backups: bootMigration.backups } : null),    root: ROOT,
+    rootSource: library.source,
+    rootInfo: {
+      source: library.source,
+      custom: library.custom,
+      envRoot: library.envRoot,
+      defaultRoot: library.defaultRoot,
+      locatorPath: locatorPath(),
+      updatedAt: library.updatedAt,
+      // 环境变量在时不建议在面板里改路径：改了也不生效
+      locked: library.source === 'env',
+      pendingMove: pendingMove(ROOT),
+    },
   }
 }
 
@@ -193,6 +222,16 @@ function pruneJobs() {
     if (!oldest) break
     jobs.delete(oldest.id)
   }
+}
+
+/** 还在跑（排队或执行中）的任务数：切库前要等它们结束。 */
+function activeJobCount() {
+  let n = 0
+  for (const job of jobs.values()) {
+    if (job.status === 'done' || job.status === 'error') continue
+    n += 1
+  }
+  return n
 }
 
 function readReference(id) {
@@ -350,6 +389,63 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/interfaces') {
+      json(res, 200, configView())
+      return
+    }
+
+    // ---- 资产库位置：查询候选路径是否可用 / 切换（可选整库搬迁） ----
+
+    if (req.method === 'POST' && url.pathname === '/root/check') {
+      let body
+      try { body = await readJson(req) } catch (err) { json(res, 400, { error: err.message }); return }
+      const verdict = validateLibraryRoot(body?.root, { env: process.env, currentRoot: ROOT, extRoot: EXT_ROOT })
+      json(res, 200, verdict)
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/root') {
+      let body
+      try { body = await readJson(req) } catch (err) { json(res, 400, { error: err.message }); return }
+      if (library.source === 'env') {
+        json(res, 400, { error: '当前被环境变量 IMAGE_ASSETS_ROOT 覆盖：面板保存不会生效，先清掉这个环境变量' })
+        return
+      }
+      if (activeJobCount() > 0) {
+        json(res, 409, { error: '还有生成任务在跑：等它结束再切换资产库，避免新图写进半途的库' })
+        return
+      }
+      const verdict = validateLibraryRoot(body?.root, { env: process.env, currentRoot: ROOT, extRoot: EXT_ROOT })
+      if (!verdict.ok) { json(res, 400, { error: verdict.error }); return }
+
+      const migrate = body?.migrate !== false // 默认整库搬迁（面板的推荐路径）
+      const from = ROOT
+      let moved = null
+      try {
+        if (migrate) {
+          moved = moveLibrary(from, verdict.root)
+        } else {
+          // 只切换：旧库原样不动；新库若是空的，接口与密钥需要重新配置
+          ensureLibrary(verdict.root)
+        }
+        writeLocator(verdict.root)
+      } catch (err) {
+        json(res, 500, { error: `切换失败：${String(err?.message || err)}` })
+        return
+      }
+      const next = reloadLibrary()
+      void emit('config-changed', { reason: 'root', root: next.root })
+      json(res, 200, { ...configView(), moved })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/root/reset') {
+      if (activeJobCount() > 0) {
+        json(res, 409, { error: '还有生成任务在跑：等它结束再切换资产库' })
+        return
+      }
+      clearLocator()
+      const next = reloadLibrary()
+      void emit('config-changed', { reason: 'root', root: next.root })
       json(res, 200, configView())
       return
     }
@@ -728,6 +824,12 @@ server.listen(PORT, '127.0.0.1', () => {
 // ---- 变更监视：插件直接写盘，这里轮询签名变化后推送 ----
 
 let lastSig = indexSignature()
+
+/** 切换库目录后要重置监视基线，否则第一轮会把整个新库当成"刚变化"。 */
+function resetWatchSignature() {
+  lastSig = indexSignature()
+}
+
 const timer = setInterval(() => {
   const sig = indexSignature()
   if (sig !== lastSig) {

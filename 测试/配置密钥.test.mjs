@@ -10,6 +10,8 @@ import {
   DEFAULT_SETTINGS, readSettings, writeSettings, normalizeSettings, settingsPath, keysDir,
   upsertInterface, removeInterface, resolveInterface, describeInterfaces, normalizeInterface,
   migrateV1, SETTINGS_VERSION, libraryRoot, LIBRARY_DIR_NAME,
+  locatorPath, readLocator, writeLocator, clearLocator, resolveLibraryRoot, validateLibraryRoot,
+  defaultLibraryRoot,
 } from '../源码/共享/配置.js'
 import {
   encryptSecret, decryptSecret, saveKey, readStoredKey, clearStoredKey,
@@ -30,6 +32,77 @@ test('配置：资产库默认目录由用户主目录派生，环境变量优�
   assert.equal(libraryRoot({ IMAGE_ASSETS_ROOT: '  ' }, home), path.join(home, LIBRARY_DIR_NAME), '空值当作没设')
   assert.equal(libraryRoot({ IMAGE_ASSETS_ROOT: path.join(home, 'lib') }, home), path.join(home, 'lib'))
   assert.ok(!libraryRoot({}, home).includes('AppData'), '默认值里不出现本机绝对路径')
+})
+
+// 位置指针与路径解析：每个用例用独立的假配置目录（模拟 %APPDATA%），不碰真实文件
+
+function fakeEnv() {
+  const dir = fs.mkdtempSync(path.join(TMP, 'loc-'))
+  return { env: { APPDATA: dir, XDG_CONFIG_HOME: '' }, home: path.join(dir, 'home'), dir }
+}
+
+test('位置：四档解析顺序 显式 > 环境变量 > 自定义 > 出厂默认', () => {
+  const { env, home, dir } = fakeEnv()
+  const custom = path.join(dir, 'custom-lib')
+  assert.equal(resolveLibraryRoot({ env, home }).source, 'default')
+  assert.equal(resolveLibraryRoot({ env, home }).root, defaultLibraryRoot(home))
+
+  writeLocator(custom, env, home)
+  const withCustom = resolveLibraryRoot({ env, home })
+  assert.equal(withCustom.source, 'custom')
+  assert.equal(withCustom.root, path.resolve(custom))
+
+  const withEnv = resolveLibraryRoot({ env: { ...env, IMAGE_ASSETS_ROOT: path.join(dir, 'env-lib') }, home })
+  assert.equal(withEnv.source, 'env', '环境变量算"有要求"，压过自定义路径')
+
+  const withExplicit = resolveLibraryRoot({ explicit: path.join(dir, 'call-lib'), env, home })
+  assert.equal(withExplicit.source, 'explicit', '调用时显式指定最优先')
+  assert.equal(withExplicit.root, path.resolve(path.join(dir, 'call-lib')))
+})
+
+test('位置：坏指针文件回落到默认，不抛错；清掉后回到默认', () => {
+  const { env, home, dir } = fakeEnv()
+  const file = locatorPath(env, home)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, '{ 坏掉的 json', 'utf8')
+  assert.equal(readLocator(env, home).root, '')
+  assert.equal(resolveLibraryRoot({ env, home }).source, 'default')
+
+  writeLocator(path.join(dir, 'lib'), env, home)
+  assert.equal(readLocator(env, home).root, path.resolve(path.join(dir, 'lib')))
+  clearLocator(env, home)
+  assert.equal(readLocator(env, home).root, '')
+})
+
+test('位置：路径校验拒绝相对路径、盘符根、当前库、当前库内部、扩展目录', () => {
+  const { env, home, dir } = fakeEnv()
+  const cur = path.join(dir, 'current-lib')
+  const ext = path.join(dir, 'ext-install')
+  fs.mkdirSync(cur, { recursive: true })
+  fs.mkdirSync(ext, { recursive: true })
+
+  assert.equal(validateLibraryRoot('', { env, currentRoot: cur }).ok, false)
+  assert.equal(validateLibraryRoot('relative/dir', { env, currentRoot: cur }).ok, false, '相对路径被拒')
+  assert.equal(validateLibraryRoot('C:\\', { env, currentRoot: cur }).ok, false, '盘符根被拒')
+  assert.equal(validateLibraryRoot(cur, { env, currentRoot: cur }).ok, false, '当前路径被拒')
+  assert.equal(validateLibraryRoot(path.join(cur, 'sub'), { env, currentRoot: cur }).ok, false, '当前库内部被拒')
+  assert.equal(validateLibraryRoot(path.join(ext, 'lib'), { env, currentRoot: cur, extRoot: ext }).ok, false, '扩展目录被拒')
+
+  const fresh = path.join(dir, 'new-lib')
+  const ok = validateLibraryRoot(fresh, { env, currentRoot: cur })
+  assert.equal(ok.ok, true, '不存在的空目录（上级可写）可用')
+  assert.equal(ok.root, path.resolve(fresh))
+})
+
+test('位置：环境变量已覆盖时面板保存会被明确拒绝（避免"存了却不生效"）', () => {
+  const { env, home, dir } = fakeEnv()
+  const envRoot = path.join(dir, 'env-lib')
+  const verdict = validateLibraryRoot(path.join(dir, 'other'), { env: { ...env, IMAGE_ASSETS_ROOT: envRoot }, currentRoot: envRoot })
+  assert.equal(verdict.ok, true, '换到别处仍然可以（只是当前由环境变量决定）')
+  // 目标正好等于环境变量所指：拒绝并说明原因
+  const same = validateLibraryRoot(envRoot, { env: { ...env, IMAGE_ASSETS_ROOT: envRoot }, currentRoot: path.join(dir, 'x') })
+  assert.equal(same.ok, false)
+  assert.match(same.error, /环境变量/)
 })
 
 test('配置：缺文件 → 默认值（没有任何接口、没有预置服务商）', () => {
